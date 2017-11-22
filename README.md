@@ -49,12 +49,11 @@ Output from above must yield **AWS CLI version >= 1.11.37**
 #### 1. Clone the repository
 
 ```console
-git clone ssh://git.amazon.com/pkg/ec2-spot-labs
+git clone https://github.com/aws-samples/ecs-refarch-mixed-mode.git
 ```
 
 #### 2. Run bin/deploy
 ```console
-cd ec2-spot-labs/ecs-ec2-spot-autoscaling
 bin/deploy
 ```
 
