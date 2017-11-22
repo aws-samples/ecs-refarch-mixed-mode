@@ -1,0 +1,492 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: ECS on spot instances example
+Mappings:
+  ecsoptimizedami:
+    ap-northeast-1:
+      ami: ami-f63f6f91
+    ap-southeast-1:
+      ami: ami-b4ae1dd7
+    ap-southeast-2:
+      ami: ami-fbe9eb98
+    ca-central-1:
+      ami: ami-ee58e58a
+    eu-central-1:
+      ami: ami-085e8a67
+    eu-west-1:
+      ami: ami-95f8d2f3
+    eu-west-2:
+      ami: ami-bf9481db
+    us-east-1:
+      ami: ami-275ffe31
+    us-east-2:
+      ami: ami-62745007
+    us-west-1:
+      ami: ami-689bc208
+    us-west-2:
+      ami: ami-62d35c02
+Metadata:
+  Authors:
+    Description: anshrma@amazon.com
+  License:
+    Description: 'Copyright 2017 Amazon.com, Inc. and its affiliates. All Rights Reserved.
+
+      Licensed under the Amazon Software License (the "License"). You may not use this file
+      except in compliance with the License. A copy of the License is located at
+
+      http://aws.amazon.com/asl/
+
+      or in the "license" file accompanying this file. This file is distributed on an "AS IS"
+      BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+      License for the specific language governing permissions and limitations under the License.'
+Parameters:
+
+  SpotBidPrice:
+    Default: 0.05
+    Description: Spot Instance bid price
+    Type: String
+  InstanceType:
+    Default: c3.large
+    Description: Instance Type
+    Type: String
+
+  InstanceProfile:
+    Description: InstanceProfile
+    Type: String
+  InstanceSG:
+    Description: Security Groups on Instance
+    Type: AWS::EC2::SecurityGroup::Id
+  PurchaseOption:
+    Description: Security Groups on Instance
+    Type: String
+    AllowedValues:
+      - OnDemand
+      - Spot
+  CloudWatchLogsGroup:
+    Description: Log Group for log aggregation
+    Type: String
+  Subnet1:
+    Description: Subnet where instances will be placed
+    Type: AWS::EC2::Subnet::Id
+  Subnet2:
+    Description: Subnets where instances will be placed
+    Type: AWS::EC2::Subnet::Id
+  ServiceRole:
+    Description: Role used by ECS Service
+    Type: String
+  TaskRole:
+    Description: Role used by ECS Tasks
+    Type: String
+  TargetGroupARN:
+    Description: ARN of the Target Group
+    Type: String
+  snsTopic:
+    Description: SNS Topic where termination notices will be sent
+    Type: String
+  MinTaskNumber:
+    Description: Min. Number of Tasks the Service should run
+    Type: String
+  MaxTaskNumber:
+    Description: Max. Number of Tasks the Service should run
+    Type: String
+  TaskScaleUpAdjustment:
+    Description: The number by which the tasks should increment
+    Type: String
+  TaskScaleDownAdjustment:
+    Description: The number by which the tasks should decrease
+    Type: String
+
+
+Conditions:
+  IsSpot: !Equals [ !Ref PurchaseOption, Spot ]
+Resources:
+
+  ecsCluster:
+    Type: AWS::ECS::Cluster
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              mode: 000400
+              owner: root
+              group: root
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.ContainerInstances.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource LaunchConfiguration
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+    Properties:
+      ImageId: !FindInMap [ecsoptimizedami,!Ref "AWS::Region", ami]
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SpotPrice: !If [IsSpot,!Ref SpotBidPrice,!Ref "AWS::NoValue"]
+      SecurityGroups:
+        - !Ref InstanceSG
+      UserData:
+            Fn::Base64: !Sub |
+              #!/bin/bash -xe
+              export PATH=/usr/local/bin:$PATH
+              yum -y --security update
+              yum -y install jq
+              yum install -y aws-cfn-bootstrap
+              easy_install pip
+              pip install awscli
+              aws configure set default.region ${AWS::Region}
+              echo ECS_CLUSTER=${ecsCluster} >> /etc/ecs/ecs.config
+              echo ECS_ENABLE_TASK_IAM_ROLE=true >> /etc/ecs/ecs.config
+              echo ECS_INSTANCE_ATTRIBUTES={\"instance-purchase-option\":\"${PurchaseOption}\"} >> /etc/ecs/ecs.config
+
+              cat <<EOF > /tmp/awslogs.conf
+
+              [general]
+              state_file = /var/awslogs/state/agent-state
+
+              [/var/log/dmesg]
+              file = /var/log/dmesg
+              log_group_name = ${CloudWatchLogsGroup}
+              log_stream_name = %ECS_CLUSTER/%CONTAINER_INSTANCE/var/log/dmesg
+              initial_position = start_of_file
+
+              [/var/log/messages]
+              file = /var/log/messages
+              log_group_name = ${CloudWatchLogsGroup}
+              log_stream_name = %ECS_CLUSTER/%CONTAINER_INSTANCE/var/log/messages
+              datetime_format = %b %d %H:%M:%S
+              initial_position = start_of_file
+
+              [/var/log/docker]
+              file = /var/log/docker
+              log_group_name = ${CloudWatchLogsGroup}
+              log_stream_name = %ECS_CLUSTER/%CONTAINER_INSTANCE/var/log/docker
+              datetime_format = %Y-%m-%dT%H:%M:%S.%f
+              initial_position = start_of_file
+
+
+              [/var/log/ecs/ecs-init.log]
+              file = /var/log/ecs/ecs-init.log.*
+              log_group_name = ${CloudWatchLogsGroup}
+              log_stream_name = %ECS_CLUSTER/%CONTAINER_INSTANCE/var/log/ecs/ecs-init.log
+              datetime_format = %Y-%m-%dT%H:%M:%SZ
+              initial_position = start_of_file
+
+
+              [/var/log/ecs/ecs-agent.log]
+              file = /var/log/ecs/ecs-agent.log.*
+              log_group_name = ${CloudWatchLogsGroup}
+              log_stream_name = %ECS_CLUSTER/%CONTAINER_INSTANCE/var/log/ecs/ecs-agent.log
+              datetime_format = %Y-%m-%dT%H:%M:%SZ
+              initial_position = start_of_file
+
+
+              [/var/log/ecs/audit.log]
+              file = /var/log/ecs/audit.log.*
+              log_group_name = ${CloudWatchLogsGroup}
+              log_stream_name = %ECS_CLUSTER/%CONTAINER_INSTANCE/var/log/ecs/audit.log
+              datetime_format = %Y-%m-%dT%H:%M:%SZ
+              initial_position = start_of_file
+              EOF
+
+
+              cd /tmp && curl -sO https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py
+              python /tmp/awslogs-agent-setup.py -n -r ${AWS::Region} -c /tmp/awslogs.conf
+
+
+              cat <<EOF > /etc/init/cloudwatch-logs-start.conf
+              description "Configure and start CloudWatch Logs agent on Amazon ECS containerinstance"
+              author "Amazon Web Services"
+              start on started ecs
+              script
+              exec 2>>/var/log/cloudwatch-logs-start.log
+              set -x
+              until curl -s http://localhost:51678/v1/metadata; do sleep 1; done
+              ECS_CLUSTER=\$(curl -s http://localhost:51678/v1/metadata | jq .Cluster | tr-d \")
+              CONTAINER_INSTANCE=\$(curl -s http://localhost:51678/v1/metadata | jq .ContainerInstanceArn| tr -d \")
+              sed -i "s|%ECS_CLUSTER|\$ECS_CLUSTER|g" /var/awslogs/etc/awslogs.conf
+              sed -i "s|%CONTAINER_INSTANCE|\$CONTAINER_INSTANCE|g" /var/awslogs/etc/awslogs.conf
+              chkconfig awslogs on
+              service awslogs start
+              end script
+              EOF
+
+
+              cat <<EOF > /etc/init/spot-instance-termination-notice-handler.conf
+              description "Start spot instance termination handler monitoring script"
+              author "Amazon Web Services"
+              start on started ecs
+              script
+              echo \$\$ > /var/run/spot-instance-termination-notice-handler.pid
+              exec /usr/local/bin/spot-instance-termination-notice-handler.sh
+              end script
+              pre-start script
+              logger "[spot-instance-termination-notice-handler.sh]: spot instance terminationnotice handler started"
+              end script
+              EOF
+
+
+              cat <<EOF > /usr/local/bin/spot-instance-termination-notice-handler.sh
+              #!/bin/bash
+              while sleep 5; do
+              if [ -z \$(curl -Isf http://169.254.169.254/latest/meta-data/spot/termination-time)];then
+              /bin/false
+              else
+              logger "[spot-instance-termination-notice-handler.sh]: spot instance terminationnotice detected"
+              STATUS=DRAINING
+              ECS_CLUSTER=\$(curl -s http://localhost:51678/v1/metadata | jq .Cluster | tr-d \")
+              CONTAINER_INSTANCE=\$(curl -s http://localhost:51678/v1/metadata | jq .ContainerInstanceArn| tr -d \")
+              logger "[spot-instance-termination-notice-handler.sh]: putting instance in state\$STATUS"
+              logger "[spot-instance-termination-notice-handler.sh]: running: /usr/local/bin/awsecs update-container-instances-state --cluster \$ECS_CLUSTER --container-instances\$CONTAINER_INSTANCE --status \$STATUS"
+              /usr/local/bin/aws ecs update-container-instances-state --cluster \$ECS_CLUSTER--container-instances \$CONTAINER_INSTANCE --status \$STATUS
+              logger "[spot-instance-termination-notice-handler.sh]: running: \"/usr/local/bin/awssns publish --topic-arn ${snsTopic} --message \"Spot instance termination noticedetected. Details: cluster: \$ECS_CLUSTER, container_instance: \$CONTAINER_INSTANCE.Putting instance in state \$STATUS.\""
+              /usr/local/bin/aws sns publish --topic-arn ${snsTopic} --message "Spot instancetermination notice detected. Details: cluster: \$ECS_CLUSTER, container_instance:\$CONTAINER_INSTANCE. Putting instance in state \$STATUS."
+              logger "[spot-instance-termination-notice-handler.sh]: putting myself to sleep..."
+              sleep 120
+              fi
+              done
+              EOF
+
+
+              chmod +x /usr/local/bin/spot-instance-termination-notice-handler.sh
+              /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource LaunchConfiguration
+              /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource AutoScalingGroup
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref Subnet1
+        - !Ref Subnet2
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      MinSize: 1
+      MaxSize: 10
+      DesiredCapacity: 1
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName} - ECS Host
+          PropagateAtLaunch: true
+        - Key: Pricing
+          Value: !Ref PurchaseOption
+          PropagateAtLaunch: true
+
+
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT15M
+        WaitOnResourceSignals: true
+
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ecsCluster
+      Role: !Ref ServiceRole
+      DesiredCount: !Ref MinTaskNumber
+      TaskDefinition: !Ref TaskDefinition
+      PlacementStrategies:
+        - Type: spread
+          Field: attribute:ecs.availability-zone
+        - Type: spread
+          Field: attribute:instance-purchase-option
+      PlacementConstraints:
+        - Type: memberOf
+          Expression: !Sub attribute:instance-purchase-option == ${PurchaseOption}
+      LoadBalancers:
+        - ContainerName: nginx
+          ContainerPort: 80
+          TargetGroupArn: !Ref TargetGroupARN
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      #Family: !Sub ${AWS::StackName}-simple-app
+      ContainerDefinitions:
+        - Name: nginx
+          Image: nginx
+          Essential: true
+          Memory: 256
+          Cpu: 256
+          PortMappings:
+            - ContainerPort: 80
+              HostPort: 0
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogsGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: nginx
+      Volumes: []
+      TaskRoleArn: !Ref TaskRole
+
+# Task Level AutoScaling Rules Starts here
+  AutoScalingService:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !Ref MaxTaskNumber
+      MinCapacity: !Ref MinTaskNumber
+      ResourceId: !Join [/, [service, !Ref ecsCluster, !GetAtt [ECSService, Name]]]
+      RoleARN: !Ref ServiceRole
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  ScalingUpPolicyService:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-${ECSService}-ScalingUpPolicy
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref AutoScalingService
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        StepAdjustments:
+        - ScalingAdjustment: !Ref TaskScaleUpAdjustment
+          MetricIntervalLowerBound: 0
+  ScalingDownPolicyService:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-${ECSService}-ScalingDownPolicy
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref AutoScalingService
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        StepAdjustments:
+        - ScalingAdjustment: !Ref TaskScaleDownAdjustment
+          MetricIntervalUpperBound: -20
+        - ScalingAdjustment: -1
+          MetricIntervalLowerBound: -20
+          MetricIntervalUpperBound: -10
+  HighCPUServiceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: CPUUtilization exceeding threshold . Triggers scale up
+      ActionsEnabled: true
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Unit: Percent
+      Dimensions:
+      - Name: ClusterName
+        Value: !Ref ecsCluster
+      - Name: ServiceName
+        Value: !GetAtt [ECSService, Name]
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '2'
+      Threshold: '70'
+      AlarmActions: [!Ref ScalingUpPolicyService]
+      ComparisonOperator: GreaterThanThreshold
+  LowCPUServiceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: CPUUtilization lowers threshold . Triggers scale down
+      ActionsEnabled: true
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Unit: Percent
+      Dimensions:
+      - Name: ClusterName
+        Value: !Ref ecsCluster
+      - Name: ServiceName
+        Value: !GetAtt [ECSService, Name]
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '2'
+      Threshold: '20'
+      AlarmActions: [!Ref ScalingDownPolicyService]
+      ComparisonOperator: LessThanThreshold
+
+
+# Task Level AutoScaling Rules Ends here
+
+# Cluster level AutoScaling Rules Start here
+
+  ClusterScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      PolicyType: SimpleScaling
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: 10
+      ScalingAdjustment: 1
+  ClusterScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      PolicyType: SimpleScaling
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: 10
+      ScalingAdjustment: -1
+  ClusterHighMemoryUtilizationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Average Memory Utilization for the boxes in the ASG is above
+        70% for 1 minutes. Triggers scale up
+      ActionsEnabled: true
+      Namespace: AWS/ECS
+      MetricName: MemoryUtilization
+      Unit: Percent
+      Dimensions:
+      - Name: ClusterName
+        Value: !Ref ecsCluster
+      Statistic: Maximum
+      Period: '60'
+      EvaluationPeriods: '1'
+      Threshold: '70'
+      AlarmActions: [!Ref ClusterScaleUpPolicy]
+      ComparisonOperator: GreaterThanThreshold
+  ClusterHighMemoryReservationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Average Memory Reservation for the boxes in the ASG is above
+        70% for 3 minutes. Triggers scale up
+      ActionsEnabled: true
+      Namespace: AWS/ECS
+      MetricName: MemoryReservation
+      Unit: Percent
+      Dimensions:
+      - Name: ClusterName
+        Value: !Ref ecsCluster
+      Statistic: Maximum
+      Period: '60'
+      EvaluationPeriods: '1'
+      Threshold: '70'
+      AlarmActions: [!Ref ClusterScaleUpPolicy]
+      ComparisonOperator: GreaterThanThreshold
+  ClusterLowMemoryReservationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Average Memory Reservation for the boxes in the ASG is less.
+        Triggers scale down
+      ActionsEnabled: true
+      Namespace: AWS/ECS
+      MetricName: MemoryReservation
+      Unit: Percent
+      Dimensions:
+      - Name: ClusterName
+        Value: !Ref ecsCluster
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '10'
+      Threshold: '20'
+      AlarmActions: [!Ref ClusterScaleDownPolicy]
+      ComparisonOperator: LessThanThreshold
+
+# Cluster level AutoScaling Rules End here
+
+Outputs:
+  AutoScalingService:
+    Value: !Ref AutoScalingService

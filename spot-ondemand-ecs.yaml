@@ -1,0 +1,280 @@
+Description: >
+  This template illustrates reference architecture for having a mix of spot and ondemand instances behind load balancer
+  both running ECS tasks, dynamically scaling up and down based on systemic parameters.
+
+
+Parameters:
+
+  TemplateBucket:
+    Type: String
+    Description: >
+      S3 Bucket used for nested templates
+
+
+Metadata:
+  Authors:
+    Description: anshrma@amazon.com
+  License:
+    Description: 'Copyright 2017 Amazon.com, Inc. and its affiliates. All Rights Reserved.
+
+      Licensed under the Amazon Software License (the "License"). You may not use this file
+      except in compliance with the License. A copy of the License is located at
+
+      http://aws.amazon.com/asl/
+
+      or in the "license" file accompanying this file. This file is distributed on an "AS IS"
+      BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+      License for the specific language governing permissions and limitations under the License.'
+
+
+Resources:
+
+  cloudWatchLogsGroup:
+    Properties:
+      RetentionInDays: 7
+    Type: AWS::Logs::LogGroup
+# Security Groups Start here
+  ALBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG on ALB
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0 # Change this to restrict the traffic
+          IpProtocol: TCP
+          FromPort: 80
+          ToPort: 80
+      VpcId: !GetAtt VPC.Outputs.VpcId
+  InstanceSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG on Instance
+      VpcId: !GetAtt VPC.Outputs.VpcId
+  ALBToInstanceEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      DestinationSecurityGroupId:  !GetAtt InstanceSG.GroupId
+      FromPort: -1
+      GroupId: !GetAtt ALBSG.GroupId
+      IpProtocol: -1
+      ToPort: -1
+  InstanceIngressFromALB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      FromPort: -1
+      GroupId: !GetAtt InstanceSG.GroupId
+      IpProtocol: -1
+      SourceSecurityGroupId: !GetAtt ALBSG.GroupId
+      ToPort: -1
+# Security Groups End here
+
+  snsTopic:
+    Type: AWS::SNS::Topic
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !GetAtt VPC.Outputs.Subnet1
+        - !GetAtt VPC.Outputs.Subnet2
+      SecurityGroups:
+        - !Ref ALBSG
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: LoadBalancer
+    Properties:
+      VpcId: !GetAtt VPC.Outputs.VpcId
+      Port: 80
+      Protocol: HTTP
+      Matcher:
+        HttpCode: 200-299
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values:
+          - "*"
+      ListenerArn: !Ref LoadBalancerListener
+      Priority: 1
+
+# IAM ROLES Start Here
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "ecs.amazonaws.com","application-autoscaling.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            - logs:DescribeLogStreams
+            Effect: Allow
+            Resource: arn:aws:logs:*:*:*
+          Version: 2012-10-17
+        PolicyName: !Sub ${AWS::Region}-${AWS::StackName}-taskrole
+  spotFleetInstanceProfile:
+    Properties:
+      Path: /
+      Roles:
+      - Ref: spotFleetInstanceRole
+    Type: AWS::IAM::InstanceProfile
+  spotFleetInstanceRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - ecs:UpdateContainerInstancesState
+            Effect: Allow
+            Resource: '*'
+          Version: 2012-10-17
+        PolicyName: !Sub ${AWS::Region}-ecsUpdateContainerInstancesStatePolicy
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            - logs:DescribeLogStreams
+            Effect: Allow
+            Resource: arn:aws:logs:*:*:*
+          Version: 2012-10-17
+        PolicyName: !Sub ${AWS::Region}-cloudWatchLogsPolicy
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - sns:Publish
+            Effect: Allow
+            Resource:
+              Ref: snsTopic
+          Version: 2012-10-17
+        PolicyName: !Sub ${AWS::Region}-snsPublishPolicy
+    Type: AWS::IAM::Role
+  spotFleetRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - spotfleet.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetRole
+      Path: /
+    Type: AWS::IAM::Role
+# IAM Roles End here
+
+  VPC:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/templates/vpc.yaml
+      Parameters:
+        Name: !Ref AWS::StackName
+        VpcCIDR: 10.215.0.0/16
+        Subnet1CIDR: 10.215.10.0/24
+        Subnet2CIDR: 10.215.20.0/24
+
+  OnDemandCluster:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/templates/ecs-cluster.yaml
+      Parameters:
+        InstanceType: t2.small
+        InstanceProfile: !GetAtt spotFleetInstanceProfile.Arn
+        InstanceSG: !GetAtt InstanceSG.GroupId
+        PurchaseOption: OnDemand
+        CloudWatchLogsGroup: !Ref cloudWatchLogsGroup
+        Subnet1: !GetAtt VPC.Outputs.Subnet1
+        Subnet2: !GetAtt VPC.Outputs.Subnet2
+        ServiceRole: !GetAtt ECSServiceRole.Arn
+        TaskRole: !GetAtt TaskRole.Arn
+        TargetGroupARN: !Ref TargetGroup
+        snsTopic: !Ref snsTopic
+        MinTaskNumber: 1
+        MaxTaskNumber: 20
+        TaskScaleUpAdjustment: 1
+        TaskScaleDownAdjustment: 1
+  SpotCluster:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/templates/ecs-cluster.yaml
+      Parameters:
+        SpotBidPrice: 0.05
+        InstanceType: c3.large
+        InstanceProfile: !GetAtt spotFleetInstanceProfile.Arn
+        InstanceSG: !GetAtt InstanceSG.GroupId
+        PurchaseOption: Spot
+        CloudWatchLogsGroup: !Ref cloudWatchLogsGroup
+        Subnet1: !GetAtt VPC.Outputs.Subnet1
+        Subnet2: !GetAtt VPC.Outputs.Subnet2
+        ServiceRole: !GetAtt ECSServiceRole.Arn
+        TaskRole: !GetAtt TaskRole.Arn
+        TargetGroupARN: !Ref TargetGroup
+        snsTopic: !Ref snsTopic
+        MinTaskNumber: 4
+        MaxTaskNumber: 20
+        TaskScaleUpAdjustment: 1
+        TaskScaleDownAdjustment: 1
+
+
+Outputs:
+ LoadBalancerDNS:
+    Description: LoadBalancer DNS
+    Value: !GetAtt LoadBalancer.DNSName

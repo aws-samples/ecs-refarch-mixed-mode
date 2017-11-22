@@ -1,0 +1,10 @@
+#!/bin/bash
+
+set -o errexit -o xtrace
+echo -n "Enter S3 Bucket to host the templates and scripts > "
+read bucket
+echo -n "Enter stackname to create or update the stack > "
+read stackname
+
+aws s3 cp --recursive templates/ "s3://${bucket}/templates" --acl public-read
+aws cloudformation deploy --stack-name $stackname --template-file spot-ondemand-ecs.yaml --capabilities CAPABILITY_NAMED_IAM --parameter-overrides TemplateBucket=$bucket
