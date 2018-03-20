@@ -218,6 +218,7 @@ Resources:
               CONTAINER_INSTANCE=\$(curl -s http://localhost:51678/v1/metadata | jq .ContainerInstanceArn| tr -d \")
               sed -i "s|%ECS_CLUSTER|\$ECS_CLUSTER|g" /var/awslogs/etc/awslogs.conf
               sed -i "s|%CONTAINER_INSTANCE|\$CONTAINER_INSTANCE|g" /var/awslogs/etc/awslogs.conf
+              sed -i "s|\:|_|g" /var/awslogs/etc/awslogs.conf
               chkconfig awslogs on
               service awslogs start
               end script
