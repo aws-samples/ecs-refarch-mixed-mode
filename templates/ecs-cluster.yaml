@@ -216,7 +216,7 @@ Resources:
               until curl -s http://localhost:51678/v1/metadata; do sleep 1; done
               ECS_CLUSTER=\$(curl -s http://localhost:51678/v1/metadata | jq .Cluster | tr-d \")
               CONTAINER_INSTANCE=\$(curl -s http://localhost:51678/v1/metadata | jq .ContainerInstanceArn| tr -d \")
-              CONTAINER_INSTANCE=\$(echo $CONTAINER_INSTANCE | sed "s|\:|_|g")
+              CONTAINER_INSTANCE=\$(echo \$CONTAINER_INSTANCE | sed "s|\:|_|g")
               sed -i "s|%ECS_CLUSTER|\$ECS_CLUSTER|g" /var/awslogs/etc/awslogs.conf
               sed -i "s|%CONTAINER_INSTANCE|\$CONTAINER_INSTANCE|g" /var/awslogs/etc/awslogs.conf
               chkconfig awslogs on
