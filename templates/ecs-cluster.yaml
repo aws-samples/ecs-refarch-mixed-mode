@@ -220,6 +220,7 @@ Resources:
               sed -i "s|%ECS_CLUSTER|\$ECS_CLUSTER|g" /var/awslogs/etc/awslogs.conf
               sed -i "s|%CONTAINER_INSTANCE|\$CONTAINER_INSTANCE|g" /var/awslogs/etc/awslogs.conf
               chkconfig awslogs on
+              service awslogs stop
               service awslogs start
               end script
               EOF
