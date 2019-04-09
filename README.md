@@ -96,4 +96,4 @@ Comments, feedback, and pull requests are always welcome.
 
 ## License
 
-This project is licensed under the [Amazon Software License](https://aws.amazon.com/asl/) - see the [LICENSE](LICENSE) file for details.
+This sample code is made available under the MIT-0 license. See the LICENSE file.
